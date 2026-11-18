@@ -324,9 +324,9 @@ pub fn present_download() -> bool {
     false
 }
 
-/// Snapshot ABI shared with TouchControls.swift: thirteen normalized button centres,
-/// NaN for built-in placement. Flags: hide paint=1, cursor=2, joystick=4,
-/// disable mouse gestures=8, disable hotbar gestures=16.
+/// Snapshot ABI shared with TouchControls.swift: normalized centres, sizes and
+/// opacities, with NaN for built-in placement. Bits 0–5 are the shared options;
+/// bits 8–27 disable individual built-in controls in paint and hit testing.
 /// An older/missing launcher keeps the original layout and visibility.
 pub fn touch_preferences() -> ([f32; 100], u32) {
     let positions = [f32::NAN; 100];

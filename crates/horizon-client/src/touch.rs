@@ -188,13 +188,24 @@ const EDITABLE: [Control; 20] = [
 /// Missing/non-finite coordinates use the original position; valid centres are
 /// clamped by the actual button size, including after resizing or a GUI scale change.
 pub fn layout_with_positions(w: f32, h: f32, positions: &[f32]) -> Vec<(Control, Rect)> {
+    layout_with_preferences(w, h, positions, if joystick_mode() { 4 } else { 0 })
+}
+
+fn layout_with_preferences(w: f32, h: f32, positions: &[f32], flags: u32) -> Vec<(Control, Rect)> {
     let mut buttons = default_layout(w, h);
+    let joystick = flags & 4 != 0;
     buttons.retain(|(c, _)| {
-        if joystick_mode() {
+        let movement_enabled = if joystick {
             !c.moves()
         } else {
             *c != Control::Joystick
-        }
+        };
+        // The Swift snapshot uses bits 8..=27 for the editable controls.
+        movement_enabled
+            && EDITABLE
+                .iter()
+                .position(|button| button == c)
+                .is_none_or(|i| flags & (1 << (8 + i)) == 0)
     });
     buttons.sort_by_key(|(c, _)| EDITABLE.iter().position(|v| v == c).unwrap_or(usize::MAX));
     for (control, rect) in &mut buttons {
@@ -232,7 +243,10 @@ pub fn layout_with_positions(w: f32, h: f32, positions: &[f32]) -> Vec<(Control,
 
 pub fn layout(w: f32, h: f32) -> Vec<(Control, Rect)> {
     #[cfg(target_os = "ios")]
-    return layout_with_positions(w, h, &horizon_ios_launcher::touch_preferences().0);
+    {
+        let (positions, flags) = horizon_ios_launcher::touch_preferences();
+        layout_with_preferences(w, h, &positions, flags)
+    }
     #[cfg(not(target_os = "ios"))]
     layout_with_positions(w, h, &[])
 }
@@ -711,6 +725,19 @@ mod custom_layout_tests {
             );
         }
     }
+    #[test]
+    fn hidden_builtin_button_has_no_paint_or_hit_rectangle() {
+        let normal = layout_with_preferences(650.0, 300.0, &[], 0);
+        let jump = normal.iter().find(|(c, _)| *c == Control::Jump).unwrap().1;
+        let centre = (jump[0] + jump[2] / 2.0, jump[1] + jump[3] / 2.0);
+        assert_eq!(hit(&normal, centre), Some(Control::Jump));
+
+        let hidden = layout_with_preferences(650.0, 300.0, &[], 1 << (8 + 5));
+        assert!(!hidden.iter().any(|(c, _)| *c == Control::Jump));
+        assert_eq!(hit(&hidden, centre), None);
+        assert_eq!(hidden.len(), normal.len() - 1);
+    }
+
     #[test]
     fn moved_jump_uses_identical_paint_and_hit_rectangle_after_resize() {
         let mut positions = [f32::NAN; 20];

@@ -273,6 +273,32 @@ final class TouchControlsTests: XCTestCase {
             XCTAssertEqual(r.width,45);XCTAssertEqual(r.height,36)
         }
     }
+    func testTheExistingLayoutBecomesTheDefaultProfileAndProfilesKeepTheirOwnLayout() {
+        var existing = TouchConfiguration(); existing.holdDuration = 0.9
+        TouchPreferences(defaults: defaults).save(existing)
+
+        let model = TouchPreferences(defaults: defaults)
+        XCTAssertEqual(model.profiles.count, 1)
+        XCTAssertEqual(model.profiles[0].name, "Default")
+        XCTAssertEqual(model.configuration.holdDuration, 0.9)
+
+        let second = model.create(named: "PvP")
+        XCTAssertEqual(model.activeProfile, second)
+        XCTAssertEqual(model.profiles.count, 2)
+        var tuned = model.configuration; tuned.holdDuration = 0.2; model.save(tuned)
+        model.select(model.profiles[0].id)
+        XCTAssertEqual(model.configuration.holdDuration, 0.9)
+        XCTAssertEqual(TouchPreferences(defaults: defaults).configuration.holdDuration, 0.9)
+
+        model.duplicateActive()
+        XCTAssertEqual(model.profiles.count, 3)
+        model.delete(model.activeProfile)
+        XCTAssertEqual(model.profiles.count, 2)
+        model.delete(model.activeProfile)
+        XCTAssertEqual(model.profiles.count, 1)
+        model.delete(model.activeProfile)
+        XCTAssertEqual(model.profiles.count, 1, "The last profile always stays")
+    }
 
 }
 

@@ -103,6 +103,9 @@ struct TouchSize: Codable, Equatable {
 struct TouchConfiguration: Codable, Equatable {
     var centres: [String: TouchCentre] = [:]
     var customButtons: [CustomTouchButton] = []
+    /// Built-in controls switched off in the layout editor. They keep their place and
+    /// settings so the editor can bring them back.
+    var hiddenButtons: Set<TouchButton> = []
     var sizes: [String: TouchSize] = [:]
     var opacities: [String: Double] = [:]
     var forwardLock = false
@@ -113,12 +116,13 @@ struct TouchConfiguration: Codable, Equatable {
     var hotbarGestures = true
     var slideableHotbar = false
     var holdDuration = 0.4
-    enum CodingKeys: String, CodingKey { case customButtons, centres, sizes, opacities, forwardLock, showControls, virtualMouse, joystick, mouseGestures, hotbarGestures, slideableHotbar, holdDuration }
+    enum CodingKeys: String, CodingKey { case customButtons, centres, hiddenButtons, sizes, opacities, forwardLock, showControls, virtualMouse, joystick, mouseGestures, hotbarGestures, slideableHotbar, holdDuration }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         customButtons = try c.decodeIfPresent([CustomTouchButton].self, forKey: .customButtons) ?? []
         centres = try c.decodeIfPresent([String: TouchCentre].self, forKey: .centres) ?? [:]
+        hiddenButtons = try c.decodeIfPresent(Set<TouchButton>.self, forKey: .hiddenButtons) ?? []
         sizes = try c.decodeIfPresent([String: TouchSize].self, forKey: .sizes) ?? [:]
         opacities = try c.decodeIfPresent([String: Double].self, forKey: .opacities) ?? [:]
         forwardLock = try c.decodeIfPresent(Bool.self, forKey: .forwardLock) ?? false
@@ -184,8 +188,19 @@ struct TouchConfiguration: Codable, Equatable {
             return [Float(value.width),Float(b == .joystick ? value.width : value.height)]
         }
         let alpha = TouchButton.allCases.map { Float(opacity($0)) }
-        return (points + dimensions + alpha, (forwardLock ? 32 : 0) | (showControls ? 0 : 1) | (virtualMouse ? 2 : 0) | (joystick ? 4 : 0) | (mouseGestures ? 0 : 8) | (hotbarGestures ? 0 : 16))
+        // One bit per built-in control from bit 8, in touch.rs's EDITABLE order: a hidden
+        // control leaves both painting and hit testing.
+        let hidden = hiddenButtons.reduce(UInt32(0)) { $0 | (1 << (8 + UInt32($1.rawValue))) }
+        return (points + dimensions + alpha, hidden | (forwardLock ? 32 : 0) | (showControls ? 0 : 1) | (virtualMouse ? 2 : 0) | (joystick ? 4 : 0) | (mouseGestures ? 0 : 8) | (hotbarGestures ? 0 : 16))
     }
+}
+
+/// One named layout. A build with profiles turns the player's existing layout into the
+/// Default profile on first start.
+struct TouchProfile: Codable, Equatable, Identifiable {
+    var id = UUID()
+    var name: String
+    var configuration: TouchConfiguration
 }
 
 /// The synchronous C reader may be called from a different thread. Only plain
@@ -193,21 +208,85 @@ struct TouchConfiguration: Codable, Equatable {
 final class TouchPreferences: ObservableObject {
     static let shared = TouchPreferences()
     static let key = "touchControls.v1"
+    static let profilesKey = "touchProfiles.v1"
+    static let activeKey = "touchProfile.active"
     @Published private(set) var configuration: TouchConfiguration
+    @Published private(set) var profiles: [TouchProfile]
+    @Published private(set) var activeProfile: UUID
     private let defaults: UserDefaults
     private let lock = NSLock()
     private var cached: TouchConfiguration
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        let config = defaults.data(forKey: Self.key).flatMap { try? JSONDecoder().decode(TouchConfiguration.self, from: $0) } ?? TouchConfiguration()
-        configuration = config; cached = config
+        let stored = defaults.data(forKey: Self.key).flatMap { try? JSONDecoder().decode(TouchConfiguration.self, from: $0) } ?? TouchConfiguration()
+        var profiles = defaults.data(forKey: Self.profilesKey).flatMap { try? JSONDecoder().decode([TouchProfile].self, from: $0) } ?? []
+        if profiles.isEmpty {
+            profiles = [TouchProfile(name: "Default", configuration: stored)]
+            if let list = try? JSONEncoder().encode(profiles) { defaults.set(list, forKey: Self.profilesKey) }
+            defaults.set(profiles[0].id.uuidString, forKey: Self.activeKey)
+        }
+        let wanted = defaults.string(forKey: Self.activeKey).flatMap { UUID(uuidString: $0) }
+        let active = profiles.first(where: { $0.id == wanted }) ?? profiles[0]
+        self.profiles = profiles
+        activeProfile = active.id
+        configuration = active.configuration
+        cached = active.configuration
     }
+    /// Write the profile being edited, keeping `touchControls.v1` as the layout older
+    /// builds read.
     func save(_ value: TouchConfiguration) {
-        guard let data = try? JSONEncoder().encode(value) else { return }
+        guard let index = profiles.firstIndex(where: { $0.id == activeProfile }),
+              let data = try? JSONEncoder().encode(value) else { return }
+        profiles[index].configuration = value
+        if let list = try? JSONEncoder().encode(profiles) { defaults.set(list, forKey: Self.profilesKey) }
         defaults.set(data, forKey: Self.key)
         lock.lock(); cached = value; lock.unlock()
         configuration = value
+    }
+    /// Switch to another profile and load its layout into the game.
+    func select(_ id: UUID) {
+        guard id != activeProfile, let profile = profiles.first(where: { $0.id == id }) else { return }
+        activeProfile = id
+        defaults.set(id.uuidString, forKey: Self.activeKey)
+        save(profile.configuration)
+    }
+    /// A new profile starts from the built-in layout, not from the one being edited.
+    @discardableResult
+    func create(named name: String? = nil) -> UUID {
+        let profile = TouchProfile(name: unique(name ?? "Profile"), configuration: TouchConfiguration())
+        profiles.append(profile)
+        select(profile.id)
+        return profile.id
+    }
+    /// Copy the profile in use, keeping its layout.
+    @discardableResult
+    func duplicateActive() -> UUID {
+        guard let index = profiles.firstIndex(where: { $0.id == activeProfile }) else { return activeProfile }
+        var copy = profiles[index]
+        copy.id = UUID()
+        copy.name = unique("\(profiles[index].name) copy")
+        profiles.append(copy)
+        select(copy.id)
+        return copy.id
+    }
+    func rename(_ id: UUID, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let index = profiles.firstIndex(where: { $0.id == id }) else { return }
+        profiles[index].name = trimmed
+        if let list = try? JSONEncoder().encode(profiles) { defaults.set(list, forKey: Self.profilesKey) }
+    }
+    /// The last profile stays: there is always a layout.
+    func delete(_ id: UUID) {
+        guard profiles.count > 1, let index = profiles.firstIndex(where: { $0.id == id }) else { return }
+        profiles.remove(at: index)
+        if let list = try? JSONEncoder().encode(profiles) { defaults.set(list, forKey: Self.profilesKey) }
+        if activeProfile == id { select(profiles[0].id) }
+    }
+    private func unique(_ base: String) -> String {
+        var name = base, n = 2
+        while profiles.contains(where: { $0.name == name }) { name = "\(base) \(n)"; n += 1 }
+        return name
     }
     func snapshot() -> ([Float], UInt32) {
         lock.lock(); defer { lock.unlock() }
@@ -233,9 +312,31 @@ public func horizonTouchSnapshotV2(_ buffer: UnsafeMutablePointer<Float>?, _ cap
 
 struct TouchControlsSettings: View {
     @ObservedObject private var preferences = TouchPreferences.shared
+    @State private var renaming = false
+    @State private var renameText = ""
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             SectionHeader(title: "Touch controls")
+            Picker("Profile", selection: Binding(get: { preferences.activeProfile }, set: { preferences.select($0) })) {
+                ForEach(preferences.profiles) { profile in Text(profile.name).tag(profile.id) }
+            }
+            .accessibilityIdentifier("touch-profile")
+            HStack(spacing: 12) {
+                Menu {
+                    Button("New profile") { preferences.create() }
+                    Button("Duplicate profile") { preferences.duplicateActive() }
+                    Button("Rename profile") {
+                        renameText = preferences.profiles.first(where: { $0.id == preferences.activeProfile })?.name ?? ""
+                        renaming = true
+                    }
+                    Button("Delete profile", role: .destructive) { preferences.delete(preferences.activeProfile) }
+                        .disabled(preferences.profiles.count < 2)
+                } label: {
+                    Label("Manage profiles", systemImage: "ellipsis.circle")
+                }
+                .accessibilityIdentifier("touch-profile-actions")
+                Spacer(minLength: 0)
+            }
             SecondaryButton(title: "Edit button layout", icon: "hand.draw") { presentTouchEditor() }
                 .accessibilityIdentifier("touch-edit-layout")
             Toggle("Show touch controls", isOn: Binding(get: { preferences.configuration.showControls }, set: { value in
@@ -269,6 +370,11 @@ struct TouchControlsSettings: View {
             }
             Text("Controls remain visible during screen recording. For a clean system screenshot, turn off Show touch controls first; the touch areas remain active.")
                 .font(.footnote).foregroundStyle(.secondary)
+        }
+        .alert("Rename profile", isPresented: $renaming) {
+            TextField("Profile name", text: $renameText)
+            Button("Cancel", role: .cancel) { renameText = "" }
+            Button("Rename") { preferences.rename(preferences.activeProfile, to: renameText) }
         }
     }
 }
@@ -356,7 +462,7 @@ private struct TouchLayoutEditor: View {
                                 }
                                 else { RoundedRectangle(cornerRadius:r.height * scale * 0.2).stroke(.white.opacity(0.6)) }
                             }
-                            .opacity(draft.opacity(button))
+                            .opacity(draft.hiddenButtons.contains(button) ? 0.25 : draft.opacity(button))
                             .clipShape(Rectangle())
                             .contentShape(Rectangle())
                             .position(x: r.midX * scale, y: r.midY * scale)
@@ -426,17 +532,23 @@ private struct TouchLayoutEditor: View {
                     .accessibilityIdentifier("touch-editor-save")
             }.padding(.horizontal, 12).frame(height: 54)
                     if let selected {
-                        HStack {
-                            Text("Size")
-                            Slider(value: Binding(get: {
-                                draft.rect(selected,in:gui).width / min(gui.width,gui.height)
-                            }, set: { value in
-                                let current = draft.rect(selected,in:gui).width
-                                draft.resize(selected,factor:value * min(gui.width,gui.height) / current,in:gui)
-                            }), in:0.02...0.8)
-                                .accessibilityIdentifier("touch-button-size")
-                            Text("Opacity")
-                            Slider(value:Binding(get:{ draft.opacity(selected) },set:{ draft.opacities[String(selected.rawValue)] = $0 }),in:0.1...1)
+                        VStack(spacing: 8) {
+                            HStack {
+                                Text("Size")
+                                Slider(value: Binding(get: {
+                                    draft.rect(selected,in:gui).width / min(gui.width,gui.height)
+                                }, set: { value in
+                                    let current = draft.rect(selected,in:gui).width
+                                    draft.resize(selected,factor:value * min(gui.width,gui.height) / current,in:gui)
+                                }), in:0.02...0.8)
+                                    .accessibilityIdentifier("touch-button-size")
+                                Text("Opacity")
+                                Slider(value:Binding(get:{ draft.opacity(selected) },set:{ draft.opacities[String(selected.rawValue)] = $0 }),in:0.1...1)
+                            }
+                            Toggle("Show this button", isOn: Binding(get: { !draft.hiddenButtons.contains(selected) }, set: { shown in
+                                if shown { draft.hiddenButtons.remove(selected) } else { draft.hiddenButtons.insert(selected) }
+                            }))
+                                .accessibilityIdentifier("touch-button-shown")
                         }.padding(.horizontal,16).padding(.bottom,12)
                     }
 
@@ -461,7 +573,7 @@ private struct TouchLayoutEditor: View {
             }
         }
         .confirmationDialog("Reset all button positions?", isPresented: $confirmReset, titleVisibility: .visible) {
-            Button("Reset Layout", role: .destructive) { draft.centres = [:]; draft.sizes = [:]; draft.opacities = [:]; draft.forwardLock = false; selected = nil; dragStart = nil }
+            Button("Reset Layout", role: .destructive) { draft.centres = [:]; draft.sizes = [:]; draft.opacities = [:]; draft.hiddenButtons = []; draft.forwardLock = false; selected = nil; dragStart = nil }
         } message: { Text("Save to keep the default positions, or Cancel to keep your current layout.") }
     }
 }
@@ -549,6 +661,10 @@ final class TouchGestureBridge: NSObject, UIGestureRecognizerDelegate {
         recognizers = [tap, double, hold, keyboard, scroll, hotbar]
         for recognizer in recognizers {
             recognizer.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+            // A recognizer waiting to fail must not hold a finger's release back: the game
+            // reads the raw touches for the camera, and a delayed end reads as a stuck drag.
+            recognizer.delaysTouchesBegan = false
+            recognizer.delaysTouchesEnded = false
             recognizer.cancelsTouchesInView = false
             recognizer.delegate = self
             view.addGestureRecognizer(recognizer)
@@ -653,6 +769,7 @@ final class TouchGestureBridge: NSObject, UIGestureRecognizerDelegate {
         let visible = configuration.buttons.filter { button in
             if noWorld { return false }
             if controlsHidden { return button == .hide }
+            if configuration.hiddenButtons.contains(button) { return false }
             return moreOpen || ![TouchButton.perspective, .chat, .debug, .playerList].contains(button)
         }
         if visible.contains(where: { configuration.rect($0, in: gui).contains(p) }) { return false }
@@ -667,7 +784,9 @@ final class TouchGestureBridge: NSObject, UIGestureRecognizerDelegate {
             return noWorld || configuration.mouseGestures || hotbarSlot >= 0 || (gestureRecognizer as? UILongPressGestureRecognizer)?.numberOfTouchesRequired == 2
         }
         if let tap = gestureRecognizer as? UITapGestureRecognizer, tap.numberOfTapsRequired == 2 {
-            return configuration.hotbarGestures
+            // Only a hotbar touch belongs to the double tap; anywhere else it would take
+            // the look area's quick taps with it.
+            return configuration.hotbarGestures && hotbarSlot >= 0
         }
         return noWorld || configuration.mouseGestures
     }
