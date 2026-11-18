@@ -6,18 +6,55 @@ struct CustomTouchButton: Codable, Equatable, Identifiable {
     var name = "New button"
     var bindings = [Int](repeating: 0, count: 4)
     var centre = TouchCentre(x: 0.5, y: 0.5)
-    var size = TouchSize(width: 0.15, height: 0.12)
+    var size = TouchSize(width: 0.15, height: 0.15)
+    /// A new button is square; unlocking the size keeps a separate height.
+    var square = true
     var opacity = 0.7
+    /// The editor's roundness slider: 1 is a pill (a circle when square), 0 square corners.
+    var roundness = 0.2
     var inGame = true
     var inMenu = true
     var toggle = false
+    enum CodingKeys: String, CodingKey { case id, name, bindings, centre, size, square, opacity, roundness, inGame, inMenu, toggle }
+    init() {}
+    /// Buttons saved before square sizes and roundness keep their own width and height.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? "New button"
+        bindings = try c.decodeIfPresent([Int].self, forKey: .bindings) ?? [Int](repeating: 0, count: 4)
+        centre = try c.decodeIfPresent(TouchCentre.self, forKey: .centre) ?? TouchCentre(x: 0.5, y: 0.5)
+        size = try c.decodeIfPresent(TouchSize.self, forKey: .size) ?? TouchSize(width: 0.15, height: 0.15)
+        square = try c.decodeIfPresent(Bool.self, forKey: .square) ?? false
+        let alpha = try c.decodeIfPresent(Double.self, forKey: .opacity) ?? 0.7
+        opacity = alpha.isFinite ? min(1, max(0.1, alpha)) : 0.7
+        let corner = try c.decodeIfPresent(Double.self, forKey: .roundness) ?? 0.2
+        roundness = corner.isFinite ? min(1, max(0, corner)) : 0.2
+        inGame = try c.decodeIfPresent(Bool.self, forKey: .inGame) ?? true
+        inMenu = try c.decodeIfPresent(Bool.self, forKey: .inMenu) ?? true
+        toggle = try c.decodeIfPresent(Bool.self, forKey: .toggle) ?? false
+    }
     func rect(in canvas: CGSize) -> CGRect {
         let unit = min(canvas.width, canvas.height)
         let width = min(canvas.width, unit * (size.valid ? size.width : 0.15))
-        let height = min(canvas.height, unit * (size.valid ? size.height : 0.12))
+        let height = square ? width : min(canvas.height, unit * (size.valid ? size.height : 0.12))
         let c = centre.valid ? centre : TouchCentre(x:0.5,y:0.5)
         return CGRect(x:max(0,min(canvas.width-width,c.x*canvas.width-width/2)),
                       y:max(0,min(canvas.height-height,c.y*canvas.height-height/2)),width:width,height:height)
+    }
+    /// The corner radius for the button's drawn rectangle at the same scale.
+    func cornerRadius(_ width: CGFloat, _ height: CGFloat) -> CGFloat {
+        CGFloat(min(1, max(0, roundness))) * min(width, height) / 2
+    }
+    /// Pinch or slider resize from the layout editor, keeping the centre still.
+    mutating func resize(factor: Double, in canvas: CGSize) {
+        let unit = min(canvas.width, canvas.height)
+        guard factor.isFinite, factor > 0, unit > 0 else { return }
+        let r = rect(in: canvas)
+        let width = min(0.8, max(0.02, r.width * factor / unit))
+        size.width = width
+        size.height = square ? width : min(0.8, max(0.02, r.height * factor / unit))
+        centre = TouchCentre(x: r.midX / canvas.width, y: r.midY / canvas.height)
     }
     var keys: [Int] {
         bindings.prefix(4).reduce(into:[]) { result, code in
@@ -31,7 +68,7 @@ struct TouchBinding: Identifiable {
     var id: Int { code }
     static let choices: [TouchBinding] = {
         var values = [TouchBinding(code:0,title:"None"), .init(code:-3,title:"Left mouse"), .init(code:-4,title:"Right mouse"),
-                      .init(code:-6,title:"Middle mouse"), .init(code:-7,title:"Scroll up"), .init(code:-8,title:"Scroll down"), .init(code:-1,title:"Show/hide keyboard"), .init(code:-2,title:"Show/hide controls"), .init(code:-5,title:"Toggle menu cursor mode")]
+                      .init(code:-6,title:"Middle mouse"), .init(code:-7,title:"Scroll up"), .init(code:-8,title:"Scroll down"), .init(code:-1,title:"Show/hide keyboard"), .init(code:-2,title:"Show/hide controls"), .init(code:-5,title:"Toggle menu cursor mode"), .init(code:-9,title:"Edit control layout")]
         values += (65...90).map { .init(code:$0,title:String(UnicodeScalar($0)!)) }
         values += (48...57).map { .init(code:$0,title:String(UnicodeScalar($0)!)) }
         values += (0...9).map { .init(code:320+$0,title:"Keypad \($0)") }
@@ -76,6 +113,7 @@ final class CustomTouchView: UIButton {
         self.definition=definition; self.send=send;super.init(frame:.zero)
         setTitle(definition.name,for:.normal);setTitleColor(.systemYellow,for:.selected);backgroundColor=UIColor.black.withAlphaComponent(0.4)
         layer.borderColor=UIColor.white.withAlphaComponent(0.6).cgColor;layer.borderWidth=1;layer.cornerRadius=6
+        clipsToBounds = true
         titleLabel?.adjustsFontSizeToFitWidth=true;titleLabel?.minimumScaleFactor=0.4
         accessibilityIdentifier="custom-touch-\(definition.id)"
         addTarget(self,action:#selector(down(_:event:)),for:.touchDown)
@@ -119,15 +157,10 @@ struct CustomTouchEditor: View {
                     })) {ForEach(TouchBinding.choices){Text($0.title).tag($0.code)}}.accessibilityIdentifier("custom-binding-\(index)")
                 }
             }
-            Section("Appearance") {
-                Text("Width");Slider(value:$button.size.width,in:0.02...0.8)
-                Text("Height");Slider(value:$button.size.height,in:0.02...0.8)
-                Text("Opacity");Slider(value:$button.opacity,in:0.1...1)
-            }
             Toggle("Show in game",isOn:$button.inGame)
             Toggle("Show in menus",isOn:$button.inMenu)
             Toggle("Toggle instead of hold",isOn:$button.toggle)
-            Text("Hold is the default. Minecraft’s own toggle settings still apply.").font(.footnote)
+            Text("Size, opacity and roundness are on the layout editor's toolbar beside every other button. Hold is the default; Minecraft’s own toggle settings still apply.").font(.footnote)
         }.navigationTitle("Custom button")
     }
 }

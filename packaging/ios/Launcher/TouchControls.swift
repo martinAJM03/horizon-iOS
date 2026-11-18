@@ -106,8 +106,17 @@ struct TouchConfiguration: Codable, Equatable {
     /// Built-in controls switched off in the layout editor. They keep their place and
     /// settings so the editor can bring them back.
     var hiddenButtons: Set<TouchButton> = []
+    /// Built-in controls the player deleted: gone from the editor's list and the game
+    /// until the add menu restores them.
+    var deletedButtons: Set<TouchButton> = []
     var sizes: [String: TouchSize] = [:]
     var opacities: [String: Double] = [:]
+    /// Corner roundness per built-in control: 1 is a pill (a circle when square), 0 square.
+    var roundness: [String: Double] = [:]
+    /// Built-in controls whose height follows their width; unlocked ones keep both.
+    var squareButtons: Set<TouchButton> = []
+    var gameHiddenButtons: Set<TouchButton> = []
+    var menuHiddenButtons: Set<TouchButton> = []
     var forwardLock = false
     var showControls = true
     var virtualMouse = true
@@ -116,15 +125,20 @@ struct TouchConfiguration: Codable, Equatable {
     var hotbarGestures = true
     var slideableHotbar = false
     var holdDuration = 0.4
-    enum CodingKeys: String, CodingKey { case customButtons, centres, hiddenButtons, sizes, opacities, forwardLock, showControls, virtualMouse, joystick, mouseGestures, hotbarGestures, slideableHotbar, holdDuration }
+    enum CodingKeys: String, CodingKey { case customButtons, centres, hiddenButtons, deletedButtons, sizes, opacities, roundness, squareButtons, gameHiddenButtons, menuHiddenButtons, forwardLock, showControls, virtualMouse, joystick, mouseGestures, hotbarGestures, slideableHotbar, holdDuration }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         customButtons = try c.decodeIfPresent([CustomTouchButton].self, forKey: .customButtons) ?? []
         centres = try c.decodeIfPresent([String: TouchCentre].self, forKey: .centres) ?? [:]
         hiddenButtons = try c.decodeIfPresent(Set<TouchButton>.self, forKey: .hiddenButtons) ?? []
+        deletedButtons = try c.decodeIfPresent(Set<TouchButton>.self, forKey: .deletedButtons) ?? []
         sizes = try c.decodeIfPresent([String: TouchSize].self, forKey: .sizes) ?? [:]
         opacities = try c.decodeIfPresent([String: Double].self, forKey: .opacities) ?? [:]
+        roundness = try c.decodeIfPresent([String: Double].self, forKey: .roundness) ?? [:]
+        squareButtons = try c.decodeIfPresent(Set<TouchButton>.self, forKey: .squareButtons) ?? []
+        gameHiddenButtons = try c.decodeIfPresent(Set<TouchButton>.self, forKey: .gameHiddenButtons) ?? []
+        menuHiddenButtons = try c.decodeIfPresent(Set<TouchButton>.self, forKey: .menuHiddenButtons) ?? []
         forwardLock = try c.decodeIfPresent(Bool.self, forKey: .forwardLock) ?? false
         showControls = try c.decodeIfPresent(Bool.self, forKey: .showControls) ?? true
         virtualMouse = try c.decodeIfPresent(Bool.self, forKey: .virtualMouse) ?? true
@@ -139,10 +153,52 @@ struct TouchConfiguration: Codable, Equatable {
         TouchButton.allCases.filter { button in
             // Keep the reserved ID for saved layouts, but Pause already owns Escape.
             if button == .runtime { return false }
+            if deletedButtons.contains(button) { return false }
             if button == .joystick { return joystick }
             if [.forward, .back, .left, .right].contains(button) { return !joystick }
             return true
         }
+    }
+    /// The editor's add menu: the buttons on the layout, then the deleted ones it can restore.
+    var editorButtons: [TouchButton] {
+        buttons + TouchButton.allCases.filter { $0 != .runtime && deletedButtons.contains($0) && !buttons.contains($0) }
+    }
+    /// A layout with no built-in controls at all: the player adds the ones they want.
+    static func blank() -> TouchConfiguration {
+        var config = TouchConfiguration()
+        config.deletedButtons = Set(TouchButton.allCases.filter { $0 != .runtime })
+        return config
+    }
+    func roundness(_ button: TouchButton) -> Double {
+        guard let value = roundness[String(button.rawValue)], value.isFinite else { return 1 }
+        return min(1, max(0, value))
+    }
+    /// The editor's "In game" switch, which also answers for hidden and deleted controls.
+    func showsInGame(_ button: TouchButton) -> Bool {
+        !deletedButtons.contains(button) && !hiddenButtons.contains(button) && !gameHiddenButtons.contains(button)
+    }
+    /// The editor's "In menus" switch.
+    func showsInMenu(_ button: TouchButton) -> Bool {
+        !deletedButtons.contains(button) && !hiddenButtons.contains(button) && !menuHiddenButtons.contains(button)
+    }
+    /// The height slider and sliders that set one side, keeping the centre still.
+    mutating func setSize(_ button: TouchButton, width: Double? = nil, height: Double? = nil, in canvas: CGSize) {
+        let unit = min(canvas.width, canvas.height)
+        guard unit > 0 else { return }
+        let r = rect(button, in: canvas)
+        var next = TouchSize(width: min(0.8, max(0.02, r.width / unit)), height: min(0.8, max(0.02, r.height / unit)))
+        if let width { next.width = min(0.8, max(0.02, width)) }
+        if let height { next.height = min(0.8, max(0.02, height)) }
+        if button == .joystick || squareButtons.contains(button) { next.height = next.width }
+        sizes[String(button.rawValue)] = next
+        move(button, to: CGPoint(x: r.midX, y: r.midY), in: canvas)
+    }
+    /// Lock the size square (a circle for round buttons) or unlock it for a custom height.
+    mutating func setSquare(_ button: TouchButton, _ square: Bool, in canvas: CGSize) {
+        if square { squareButtons.insert(button) } else { squareButtons.remove(button) }
+        guard square, button != .joystick else { return }
+        let unit = max(1, min(canvas.width, canvas.height))
+        setSize(button, width: Double(rect(button, in: canvas).width / unit), in: canvas)
     }
 
     func rect(_ button: TouchButton, in size: CGSize) -> CGRect {
@@ -150,7 +206,9 @@ struct TouchConfiguration: Codable, Equatable {
         if let value = sizes[String(button.rawValue)], value.valid {
             let unit = min(size.width,size.height)
             let centre = CGPoint(x:r.midX,y:r.midY)
-            r.size = CGSize(width:min(size.width,value.width*unit),height:min(size.height,(button == .joystick ? value.width : value.height)*unit))
+            let width = min(size.width,value.width*unit)
+            let square = button == .joystick || squareButtons.contains(button)
+            r.size = CGSize(width:width,height:square ? width : min(size.height,value.height*unit))
             r.origin = CGPoint(x:centre.x-r.width/2,y:centre.y-r.height/2)
         }
         if let c = centres[String(button.rawValue)], c.valid {
@@ -168,7 +226,9 @@ struct TouchConfiguration: Codable, Equatable {
     mutating func resize(_ button: TouchButton, factor: Double, in size: CGSize) {
         guard factor.isFinite, factor > 0, min(size.width,size.height) > 0 else { return }
         let r = rect(button,in:size), unit = min(size.width,size.height)
-        sizes[String(button.rawValue)] = TouchSize(width:min(0.8,max(0.02,r.width*factor/unit)),height:min(0.8,max(0.02,r.height*factor/unit)))
+        let width = min(0.8,max(0.02,r.width*factor/unit))
+        let square = button == .joystick || squareButtons.contains(button)
+        sizes[String(button.rawValue)] = TouchSize(width:width,height:square ? width : min(0.8,max(0.02,r.height*factor/unit)))
         move(button,to:CGPoint(x:r.midX,y:r.midY),in:size)
     }
     mutating func move(_ button: TouchButton, to point: CGPoint, in size: CGSize) {
@@ -189,9 +249,13 @@ struct TouchConfiguration: Codable, Equatable {
         }
         let alpha = TouchButton.allCases.map { Float(opacity($0)) }
         // One bit per built-in control from bit 8, in touch.rs's EDITABLE order: a hidden
-        // control leaves both painting and hit testing.
-        let hidden = hiddenButtons.reduce(UInt32(0)) { $0 | (1 << (8 + UInt32($1.rawValue))) }
-        return (points + dimensions + alpha, hidden | (forwardLock ? 32 : 0) | (showControls ? 0 : 1) | (virtualMouse ? 2 : 0) | (joystick ? 4 : 0) | (mouseGestures ? 0 : 8) | (hotbarGestures ? 0 : 16))
+        // or deleted control leaves both painting and hit testing.
+        let hidden = hiddenButtons.union(deletedButtons).reduce(UInt32(0)) { $0 | (1 << (8 + UInt32($1.rawValue))) }
+        // touch.rs reads these three at 100, 120 and 140, one value per EDITABLE control.
+        let corners = TouchButton.allCases.map { Float(roundness($0)) }
+        let inGame = TouchButton.allCases.map { Float(showsInGame($0) ? 1 : 0) }
+        let inMenu = TouchButton.allCases.map { Float(showsInMenu($0) ? 1 : 0) }
+        return (points + dimensions + alpha + corners + inGame + inMenu, hidden | (forwardLock ? 32 : 0) | (showControls ? 0 : 1) | (virtualMouse ? 2 : 0) | (joystick ? 4 : 0) | (mouseGestures ? 0 : 8) | (hotbarGestures ? 0 : 16))
     }
 }
 
@@ -251,10 +315,19 @@ final class TouchPreferences: ObservableObject {
         defaults.set(id.uuidString, forKey: Self.activeKey)
         save(profile.configuration)
     }
-    /// A new profile starts from the built-in layout, not from the one being edited.
+    /// A new profile starts blank, with no built-in controls, so the player builds the
+    /// layout they want instead of pruning a preset.
     @discardableResult
     func create(named name: String? = nil) -> UUID {
-        let profile = TouchProfile(name: unique(name ?? "Profile"), configuration: TouchConfiguration())
+        add(named: name ?? "Layout", configuration: TouchConfiguration.blank())
+    }
+    /// A new profile that starts from the built-in preset layout.
+    @discardableResult
+    func createPreset(named name: String? = nil) -> UUID {
+        add(named: name ?? "Layout", configuration: TouchConfiguration())
+    }
+    private func add(named name: String, configuration: TouchConfiguration) -> UUID {
+        let profile = TouchProfile(name: unique(name), configuration: configuration)
         profiles.append(profile)
         select(profile.id)
         return profile.id
@@ -302,11 +375,14 @@ public func horizonTouchPreferences(_ buffer: UnsafeMutablePointer<Float>?, _ ca
     return flags
 }
 
+/// Version two's first 100 floats are the layout it always wrote. 100–119 are
+/// corner roundness, 120–139 in-game visibility and 140–159 menu visibility, one
+/// per EDITABLE control; a reader that asks for 100 still gets the layout it knows.
 @_cdecl("horizon_touch_snapshot_v2")
 public func horizonTouchSnapshotV2(_ buffer: UnsafeMutablePointer<Float>?, _ capacity: UInt32) -> UInt32 {
     guard let buffer, capacity >= 100 else { return 0 }
     let (values, flags) = TouchPreferences.shared.snapshot()
-    for i in 0..<100 { buffer[i] = values[i] }
+    for i in 0..<min(Int(capacity), values.count) { buffer[i] = values[i] }
     return flags
 }
 
@@ -323,7 +399,8 @@ struct TouchControlsSettings: View {
             .accessibilityIdentifier("touch-profile")
             HStack(spacing: 12) {
                 Menu {
-                    Button("New profile") { preferences.create() }
+                    Button("New blank profile") { preferences.create() }
+                    Button("New profile from preset") { preferences.createPreset() }
                     Button("Duplicate profile") { preferences.duplicateActive() }
                     Button("Rename profile") {
                         renameText = preferences.profiles.first(where: { $0.id == preferences.activeProfile })?.name ?? ""
@@ -418,6 +495,7 @@ private struct TouchLayoutEditor: View {
     @State private var pinchScale: CGFloat = 1
     @State private var dragStart: CGPoint?
     @State private var selected: TouchButton?
+    @State private var selectedCustom: UUID?
     @State private var confirmReset = false
     @State private var editingCustom: UUID?
     @State private var customDrag: CGPoint?
@@ -444,6 +522,7 @@ private struct TouchLayoutEditor: View {
                     .allowsHitTesting(false)
                     ForEach(draft.buttons) { button in
                         let r = draft.rect(button, in: gui)
+                        let radius = min(r.width, r.height) * scale * CGFloat(draft.roundness(button)) / 2
                         Text(button == .joystick ? "" : button.title)
                             .multilineTextAlignment(.center)
                             .font(.system(size: max(12, r.height * scale * 0.28), weight: .semibold))
@@ -451,7 +530,7 @@ private struct TouchLayoutEditor: View {
                             .frame(width: r.width * scale, height: r.height * scale)
                             .background {
                                 if button == .joystick { Circle().fill(selected == button ? Color.accentColor.opacity(0.3) : Color.white.opacity(0.18)).frame(width:r.width * scale * 0.75,height:r.height * scale * 0.75) }
-                                else { RoundedRectangle(cornerRadius: r.height * scale * 0.2).fill(selected == button ? Color.accentColor.opacity(0.45) : Color.white.opacity(0.18)) }
+                                else { RoundedRectangle(cornerRadius: radius).fill(selected == button ? Color.accentColor.opacity(0.45) : Color.white.opacity(0.18)) }
                             }
                             .overlay {
                                 if button == .joystick {
@@ -460,7 +539,7 @@ private struct TouchLayoutEditor: View {
                                         .frame(width: min(r.width,r.height) * scale * 0.25,
                                                height: min(r.width,r.height) * scale * 0.25)
                                 }
-                                else { RoundedRectangle(cornerRadius:r.height * scale * 0.2).stroke(.white.opacity(0.6)) }
+                                else { RoundedRectangle(cornerRadius:radius).stroke(.white.opacity(0.6)) }
                             }
                             .opacity(draft.hiddenButtons.contains(button) ? 0.25 : draft.opacity(button))
                             .clipShape(Rectangle())
@@ -485,19 +564,31 @@ private struct TouchLayoutEditor: View {
 
                 ForEach($draft.customButtons) { $custom in
                     let rect = custom.rect(in:gui)
+                    let shape = RoundedRectangle(cornerRadius: custom.cornerRadius(rect.width, rect.height) * scale)
                     Text(custom.name).foregroundStyle(.white)
+                        .multilineTextAlignment(.center).minimumScaleFactor(0.4)
                         .frame(width:rect.width*scale,height:rect.height*scale)
-                        .background(.white.opacity(0.2),in:RoundedRectangle(cornerRadius:6))
+                        .background(shape.fill(selectedCustom == custom.id ? Color.accentColor.opacity(0.45) : Color.white.opacity(0.2)))
+                        .overlay(shape.stroke(.white.opacity(0.6)))
+                        .clipShape(shape)
                         .position(x:rect.midX*scale,y:rect.midY*scale)
-                        .onTapGesture {editingCustom=custom.id}
+                        .zIndex(selectedCustom == custom.id ? 1 : 0)
+                        .accessibilityIdentifier("touch-layout-custom-\(custom.id)")
+                        .onTapGesture { selected = nil; selectedCustom = custom.id }
                         .gesture(DragGesture(minimumDistance:1).onChanged { value in
                             let start=customDrag ?? CGPoint(x:rect.midX,y:rect.midY);customDrag=start
                             custom.centre=TouchCentre(x:min(1,max(0,(start.x+value.translation.width/scale)/gui.width)),y:min(1,max(0,(start.y+value.translation.height/scale)/gui.height)))
                         }.onEnded{_ in customDrag=nil})
+                        .simultaneousGesture(MagnificationGesture().onChanged { value in
+                            guard pinchScale > 0 else { return }
+                            selectedCustom = custom.id
+                            custom.resize(factor:value / pinchScale,in:gui)
+                            pinchScale = value
+                        }.onEnded { _ in pinchScale = 1 })
                         .contextMenu {
                             Button("Edit bindings"){editingCustom=custom.id}
-                            Button("Duplicate"){var copy=custom;copy.id=UUID();draft.customButtons.append(copy)}
-                            Button("Delete",role:.destructive){let id=custom.id;draft.customButtons.removeAll{$0.id==id}}
+                            Button("Duplicate"){var copy=custom;copy.id=UUID();copy.centre=TouchCentre(x:min(0.95,max(0.05,custom.centre.x+0.04)),y:custom.centre.y);draft.customButtons.append(copy)}
+                            Button("Delete",role:.destructive){let id=custom.id;draft.customButtons.removeAll{$0.id==id};if selectedCustom==id{selectedCustom=nil}}
                         }
                 }
                 VStack(spacing: 0) {
@@ -518,12 +609,33 @@ private struct TouchLayoutEditor: View {
                     .accessibilityIdentifier("touch-editor-cancel")
                 Spacer(minLength: 4)
                 Menu {
-                    Button("Add custom button") {var button=CustomTouchButton();button.centre=TouchCentre(x:0.5,y:0.75);draft.customButtons.append(button);editingCustom=button.id}
-                    ForEach(draft.customButtons) { button in Button(button.name){editingCustom=button.id} }
-                    ForEach(draft.buttons) { button in
-                        Button(button.title) { selected = button; dragStart = nil }
+                    Button("Add custom button") {
+                        var button = CustomTouchButton()
+                        button.centre = TouchCentre(x:0.5,y:0.75)
+                        draft.customButtons.append(button)
+                        selected = nil; selectedCustom = button.id
                     }
-                } label: { Label(selected?.title ?? "Touch Layout", systemImage: "hand.draw") }
+                    Button("Add layout editor button") {
+                        var button = CustomTouchButton()
+                        button.name = "Edit layout"; button.bindings = [-9,0,0,0]
+                        button.size = TouchSize(width:0.12,height:0.12)
+                        button.inMenu = false
+                        button.centre = TouchCentre(x:0.5,y:0.86)
+                        draft.customButtons.append(button)
+                        selected = nil; selectedCustom = button.id
+                    }
+                    if !draft.deletedButtons.isEmpty {
+                        Button("Restore all buttons") { restoreAllButtons() }
+                    }
+                    Divider()
+                    ForEach(draft.customButtons) { button in Button(button.name){ selected = nil; selectedCustom = button.id } }
+                    ForEach(draft.editorButtons) { button in
+                        Button(draft.deletedButtons.contains(button) ? "Restore \(button.title)" : button.title) {
+                            draft.deletedButtons.remove(button)
+                            selectedCustom = nil; selected = button; dragStart = nil
+                        }
+                    }
+                } label: { Label(selected?.title ?? selectedCustomName ?? "Touch Layout", systemImage: "hand.draw") }
                     .accessibilityIdentifier("touch-editor-select")
                 Spacer(minLength: 4)
                 Button { confirmReset = true } label: { Text("Reset").frame(minWidth: 50, minHeight: 44) }
@@ -532,24 +644,9 @@ private struct TouchLayoutEditor: View {
                     .accessibilityIdentifier("touch-editor-save")
             }.padding(.horizontal, 12).frame(height: 54)
                     if let selected {
-                        VStack(spacing: 8) {
-                            HStack {
-                                Text("Size")
-                                Slider(value: Binding(get: {
-                                    draft.rect(selected,in:gui).width / min(gui.width,gui.height)
-                                }, set: { value in
-                                    let current = draft.rect(selected,in:gui).width
-                                    draft.resize(selected,factor:value * min(gui.width,gui.height) / current,in:gui)
-                                }), in:0.02...0.8)
-                                    .accessibilityIdentifier("touch-button-size")
-                                Text("Opacity")
-                                Slider(value:Binding(get:{ draft.opacity(selected) },set:{ draft.opacities[String(selected.rawValue)] = $0 }),in:0.1...1)
-                            }
-                            Toggle("Show this button", isOn: Binding(get: { !draft.hiddenButtons.contains(selected) }, set: { shown in
-                                if shown { draft.hiddenButtons.remove(selected) } else { draft.hiddenButtons.insert(selected) }
-                            }))
-                                .accessibilityIdentifier("touch-button-shown")
-                        }.padding(.horizontal,16).padding(.bottom,12)
+                        builtInPanel(selected, gui: gui)
+                    } else if let selectedCustom {
+                        customPanel(selectedCustom, gui: gui)
                     }
 
                 }
@@ -573,8 +670,122 @@ private struct TouchLayoutEditor: View {
             }
         }
         .confirmationDialog("Reset all button positions?", isPresented: $confirmReset, titleVisibility: .visible) {
-            Button("Reset Layout", role: .destructive) { draft.centres = [:]; draft.sizes = [:]; draft.opacities = [:]; draft.hiddenButtons = []; draft.forwardLock = false; selected = nil; dragStart = nil }
+            Button("Reset Layout", role: .destructive) {
+                draft.centres = [:]; draft.sizes = [:]; draft.opacities = [:]; draft.roundness = [:]
+                draft.hiddenButtons = []; draft.deletedButtons = []; draft.squareButtons = []
+                draft.gameHiddenButtons = []; draft.menuHiddenButtons = []; draft.forwardLock = false
+                selected = nil; selectedCustom = nil; dragStart = nil
+            }
         } message: { Text("Save to keep the default positions, or Cancel to keep your current layout.") }
+    }
+
+    private var selectedCustomName: String? {
+        selectedCustom.flatMap { id in draft.customButtons.first(where: { $0.id == id })?.name }
+    }
+    private func restoreAllButtons() {
+        draft.deletedButtons = []
+        draft.hiddenButtons = []
+        draft.gameHiddenButtons = []
+        draft.menuHiddenButtons = []
+    }
+    /// Every option a built-in button has: size (square, or its own height), opacity,
+    /// roundness, which screens it appears on, and removing it from the layout.
+    @ViewBuilder private func builtInPanel(_ button: TouchButton, gui: CGSize) -> some View {
+        let unit = max(1, min(gui.width, gui.height))
+        let square = draft.squareButtons.contains(button)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text(button.title).font(.subheadline.weight(.semibold))
+                Spacer(minLength: 4)
+                Button("Delete", role: .destructive) {
+                    draft.deletedButtons.insert(button)
+                    selected = nil
+                }
+                .accessibilityIdentifier("touch-button-delete")
+            }
+            slider("Size", Binding(get: { Double(draft.rect(button, in: gui).width / unit) }, set: { value in
+                draft.setSize(button, width: value, in: gui)
+            }), 0.02...0.8, "touch-button-size")
+            if !square && button != .joystick {
+                slider("Height", Binding(get: { Double(draft.rect(button, in: gui).height / unit) }, set: { value in
+                    draft.setSize(button, height: value, in: gui)
+                }), 0.02...0.8, "touch-button-height")
+            }
+            slider("Opacity", Binding(get: { draft.opacity(button) }, set: { draft.opacities[String(button.rawValue)] = $0 }), 0.1...1, "touch-button-opacity")
+            if button != .joystick {
+                slider("Roundness", Binding(get: { draft.roundness(button) }, set: { draft.roundness[String(button.rawValue)] = $0 }), 0...1, "touch-button-roundness")
+            }
+            HStack(spacing: 6) {
+                Toggle("Square", isOn: Binding(get: { square }, set: { draft.setSquare(button, $0, in: gui) }))
+                    .accessibilityIdentifier("touch-button-square")
+                Toggle("In game", isOn: Binding(get: { !draft.gameHiddenButtons.contains(button) }, set: { on in
+                    if on { draft.gameHiddenButtons.remove(button) } else { draft.gameHiddenButtons.insert(button) }
+                }))
+                    .accessibilityIdentifier("touch-button-in-game")
+                Toggle("In menus", isOn: Binding(get: { !draft.menuHiddenButtons.contains(button) }, set: { on in
+                    if on { draft.menuHiddenButtons.remove(button) } else { draft.menuHiddenButtons.insert(button) }
+                }))
+                    .accessibilityIdentifier("touch-button-in-menu")
+                Toggle("Shown", isOn: Binding(get: { !draft.hiddenButtons.contains(button) }, set: { on in
+                    if on { draft.hiddenButtons.remove(button) } else { draft.hiddenButtons.insert(button) }
+                }))
+                    .accessibilityIdentifier("touch-button-shown")
+            }
+            .font(.caption2).toggleStyle(.button).buttonStyle(.bordered)
+        }
+        .padding(.horizontal, 12).padding(.bottom, 10)
+    }
+    /// A custom button's size, opacity and roundness, edited on the layout itself.
+    @ViewBuilder private func customPanel(_ id: UUID, gui: CGSize) -> some View {
+        if let index = draft.customButtons.firstIndex(where: { $0.id == id }) {
+            let custom = draft.customButtons[index]
+            let unit = max(1, min(gui.width, gui.height))
+            let rect = custom.rect(in: gui)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    TextField("Button name", text: Binding(get: { draft.customButtons[index].name }, set: { draft.customButtons[index].name = $0 }))
+                        .textFieldStyle(.roundedBorder).frame(maxWidth: 170)
+                        .accessibilityIdentifier("custom-panel-name")
+                    Spacer(minLength: 4)
+                    Button("Bindings") { editingCustom = id }
+                        .accessibilityIdentifier("custom-button-bindings")
+                    Button("Delete", role: .destructive) {
+                        draft.customButtons.removeAll { $0.id == id }
+                        selectedCustom = nil
+                    }
+                    .accessibilityIdentifier("custom-button-delete")
+                }
+                slider("Size", Binding(get: { Double(rect.width / unit) }, set: { value in
+                    draft.customButtons[index].size.width = min(0.8, max(0.02, value))
+                    if draft.customButtons[index].square { draft.customButtons[index].size.height = min(0.8, max(0.02, value)) }
+                }), 0.02...0.8, "custom-button-size")
+                if !custom.square {
+                    slider("Height", Binding(get: { Double(rect.height / unit) }, set: { value in
+                        draft.customButtons[index].size.height = min(0.8, max(0.02, value))
+                    }), 0.02...0.8, "custom-button-height")
+                }
+                slider("Opacity", Binding(get: { draft.customButtons[index].opacity }, set: { draft.customButtons[index].opacity = $0 }), 0.1...1, "custom-button-opacity")
+                slider("Roundness", Binding(get: { draft.customButtons[index].roundness }, set: { draft.customButtons[index].roundness = $0 }), 0...1, "custom-button-roundness")
+                HStack(spacing: 6) {
+                    Toggle("Square", isOn: Binding(get: { draft.customButtons[index].square }, set: { on in
+                        draft.customButtons[index].square = on
+                        if on { draft.customButtons[index].size.height = draft.customButtons[index].size.width }
+                    }))
+                        .accessibilityIdentifier("custom-button-square")
+                    Toggle("In game", isOn: Binding(get: { draft.customButtons[index].inGame }, set: { draft.customButtons[index].inGame = $0 }))
+                    Toggle("In menus", isOn: Binding(get: { draft.customButtons[index].inMenu }, set: { draft.customButtons[index].inMenu = $0 }))
+                    Toggle("Toggle", isOn: Binding(get: { draft.customButtons[index].toggle }, set: { draft.customButtons[index].toggle = $0 }))
+                }
+                .font(.caption2).toggleStyle(.button).buttonStyle(.bordered)
+            }
+            .padding(.horizontal, 12).padding(.bottom, 10)
+        }
+    }
+    private func slider(_ title: String, _ value: Binding<Double>, _ range: ClosedRange<Double>, _ id: String) -> some View {
+        HStack(spacing: 6) {
+            Text(title).font(.caption).frame(width: 62, alignment: .leading)
+            Slider(value: value, in: range).accessibilityIdentifier(id)
+        }
     }
 }
 
@@ -717,6 +928,11 @@ final class TouchGestureBridge: NSObject, UIGestureRecognizerDelegate {
                             }
                             continue
                         }
+                        if code == -9 {
+                            // The layout editor opens over the game once the finger lifts.
+                            if !pressed { Task { @MainActor in presentTouchEditor() } }
+                            continue
+                        }
                         self.emit(7,phase:pressed ? 1 : 3,location:CGPoint(x:code,y:0),modifiers:flags)
                     }
                 }
@@ -728,6 +944,7 @@ final class TouchGestureBridge: NSObject, UIGestureRecognizerDelegate {
             button.isHidden=hidden
             let rect=definition.rect(in:gui)
             button.frame=CGRect(x:rect.minX*unit,y:rect.minY*unit,width:rect.width*unit,height:rect.height*unit)
+            button.layer.cornerRadius=definition.cornerRadius(button.frame.width,button.frame.height)
             button.layer.opacity=config.showControls && !hideCustomPaint ? Float(min(1,max(0.1,definition.opacity))) : 0
         }
     }
@@ -769,7 +986,8 @@ final class TouchGestureBridge: NSObject, UIGestureRecognizerDelegate {
         let visible = configuration.buttons.filter { button in
             if noWorld { return false }
             if controlsHidden { return button == .hide }
-            if configuration.hiddenButtons.contains(button) { return false }
+            if configuration.hiddenButtons.contains(button) || configuration.deletedButtons.contains(button) { return false }
+            if (playing ? !configuration.showsInGame(button) : !configuration.showsInMenu(button)) { return false }
             return moreOpen || ![TouchButton.perspective, .chat, .debug, .playerList].contains(button)
         }
         if visible.contains(where: { configuration.rect($0, in: gui).contains(p) }) { return false }

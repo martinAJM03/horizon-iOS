@@ -864,18 +864,51 @@ mod stick_gesture_tests {
     }
 }
 
-pub fn opacity(control: Control) -> f32 {
+/// A built-in control's paint: opacity and corner roundness, both from the layout
+/// editor. Roundness `1.0` is a pill (a circle when square), `0.0` square corners;
+/// the editor's default keeps the original fully rounded look.
+pub fn style(control: Control) -> (f32, f32) {
     #[cfg(target_os = "ios")]
     {
         if let Some(i) = EDITABLE.iter().position(|c| *c == control) {
-            let v = horizon_ios_launcher::touch_preferences().0[80 + i];
-            if v.is_finite() {
-                return v.clamp(0.1, 1.0);
-            }
+            let values = horizon_ios_launcher::touch_preferences().0;
+            let alpha = if values[80 + i].is_finite() {
+                values[80 + i].clamp(0.1, 1.0)
+            } else {
+                1.0
+            };
+            let roundness = if values[100 + i].is_finite() {
+                values[100 + i].clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            return (alpha, roundness);
         }
     }
     let _ = control;
-    1.0
+    (1.0, 1.0)
+}
+
+/// The control's opacity alone.
+pub fn opacity(control: Control) -> f32 {
+    style(control).0
+}
+
+/// Whether a built-in control is shown in the world, or over a menu: the layout
+/// editor's two switches. A control the player deleted is not in the layout at all.
+pub fn shown(control: Control, playing: bool) -> bool {
+    #[cfg(target_os = "ios")]
+    {
+        if let Some(i) = EDITABLE.iter().position(|c| *c == control) {
+            let idle = if playing { 120 } else { 140 };
+            let value = horizon_ios_launcher::touch_preferences().0[idle + i];
+            if value.is_finite() {
+                return value > 0.5;
+            }
+        }
+    }
+    let _ = (control, playing);
+    true
 }
 pub fn forward_lock() -> bool {
     #[cfg(target_os = "ios")]

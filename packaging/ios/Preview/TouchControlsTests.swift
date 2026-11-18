@@ -99,7 +99,11 @@ final class TouchControlsTests: XCTestCase {
         let config = try JSONDecoder().decode(TouchConfiguration.self, from: old)
         XCTAssertEqual(config.centres["5"], TouchCentre(x:0.7,y:0.3))
         XCTAssertTrue(config.virtualMouse); XCTAssertFalse(config.joystick)
-        XCTAssertEqual(config.snapshot().0.count,100)
+        XCTAssertEqual(config.snapshot().0.count,160)
+        // An older layout keeps the fully rounded look and shows every control everywhere.
+        XCTAssertEqual(config.snapshot().0[100 + TouchButton.jump.rawValue],1)
+        XCTAssertEqual(config.snapshot().0[120 + TouchButton.jump.rawValue],1)
+        XCTAssertEqual(config.snapshot().0[140 + TouchButton.jump.rawValue],1)
         XCTAssertEqual(config.snapshot().1 & 2,2)
     }
     func testMalformedDataAndCoordinatesCannotMoveButtonsOffscreen() {
@@ -141,7 +145,7 @@ final class TouchControlsTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(rect.minX,0)
         XCTAssertLessThanOrEqual(rect.maxY,size.height)
         let wire = loaded.snapshot()
-        XCTAssertEqual(wire.0.count,100)
+        XCTAssertEqual(wire.0.count,160)
         XCTAssertEqual(wire.0[64],Float(rect.width / 300),accuracy:0.0001)
         XCTAssertEqual(wire.0[92],0.35,accuracy:0.0001)
         XCTAssertEqual(wire.1 & 32,32)
@@ -155,7 +159,7 @@ final class TouchControlsTests: XCTestCase {
         XCTAssertEqual(TouchButton.debug.rawValue, 18)
         XCTAssertFalse(config.buttons.contains(.runtime))
         XCTAssertTrue(config.buttons.contains(.pause))
-        XCTAssertEqual(config.snapshot().0.count, 100)
+        XCTAssertEqual(config.snapshot().0.count, 160)
     }
     func testV2SnapshotCapacityAndLegacyLimit() {
         var values = [Float](repeating:123,count:102)
@@ -270,8 +274,15 @@ final class TouchControlsTests: XCTestCase {
         for size in [CGSize(width:600,height:300),CGSize(width:300,height:600)] {
             let r=button.rect(in:size)
             XCTAssertEqual(r.midX,size.width/2);XCTAssertEqual(r.midY,size.height/2)
-            XCTAssertEqual(r.width,45);XCTAssertEqual(r.height,36)
+            XCTAssertEqual(r.width,45);XCTAssertEqual(r.height,45,"A new custom button is square")
         }
+        // Unlocking the size keeps a height of its own, as buttons saved before did.
+        button.square=false;button.size=TouchSize(width:0.15,height:0.12)
+        let unlocked=button.rect(in:CGSize(width:600,height:300))
+        XCTAssertEqual(unlocked.width,45);XCTAssertEqual(unlocked.height,36)
+        XCTAssertEqual(button.cornerRadius(100,100),10)
+        button.roundness=1
+        XCTAssertEqual(button.cornerRadius(100,60),30)
     }
     func testTheExistingLayoutBecomesTheDefaultProfileAndProfilesKeepTheirOwnLayout() {
         var existing = TouchConfiguration(); existing.holdDuration = 0.9
@@ -298,6 +309,45 @@ final class TouchControlsTests: XCTestCase {
         XCTAssertEqual(model.profiles.count, 1)
         model.delete(model.activeProfile)
         XCTAssertEqual(model.profiles.count, 1, "The last profile always stays")
+    }
+
+    func testBlankLayoutsDeletionRoundnessAndPerModeSwitchesReachTheGame() {
+        let model = TouchPreferences(defaults: defaults)
+        XCTAssertTrue(model.configuration.buttons.contains(.jump), "The existing layout keeps its buttons")
+
+        model.create(named: "Empty")
+        XCTAssertTrue(model.configuration.buttons.isEmpty, "A new profile starts blank")
+        XCTAssertEqual(model.profiles.count, 2)
+        XCTAssertNotEqual(model.configuration.snapshot().1 & (1 << (8 + TouchButton.jump.rawValue)), 0)
+        model.createPreset(named: "Preset")
+        XCTAssertTrue(model.configuration.buttons.contains(.jump))
+        XCTAssertEqual(model.profiles.count, 3)
+
+        var config = model.configuration
+        let canvas = CGSize(width: 650, height: 300)
+        config.setSquare(.jump, true, in: canvas)
+        let square = config.rect(.jump, in: canvas)
+        XCTAssertEqual(square.width, square.height)
+        config.roundness[String(TouchButton.jump.rawValue)] = 0.25
+        config.gameHiddenButtons.insert(.chat)
+        config.menuHiddenButtons.insert(.jump)
+        config.deletedButtons.insert(.sneak)
+        XCTAssertFalse(config.buttons.contains(.sneak))
+        XCTAssertTrue(config.editorButtons.contains(.sneak), "A deleted button can be restored from the add menu")
+        XCTAssertFalse(config.showsInGame(.chat))
+        XCTAssertFalse(config.showsInMenu(.jump))
+
+        let wire = config.snapshot()
+        XCTAssertEqual(wire.0.count, 160)
+        XCTAssertEqual(wire.0[100 + TouchButton.jump.rawValue], 0.25)
+        XCTAssertEqual(wire.0[120 + TouchButton.chat.rawValue], 0)
+        XCTAssertEqual(wire.0[140 + TouchButton.jump.rawValue], 0)
+        XCTAssertNotEqual(wire.1 & (1 << (8 + TouchButton.sneak.rawValue)), 0)
+
+        config.deletedButtons.remove(.sneak)
+        XCTAssertTrue(config.buttons.contains(.sneak))
+        model.save(config)
+        XCTAssertEqual(TouchPreferences(defaults: defaults).configuration, config)
     }
 
 }

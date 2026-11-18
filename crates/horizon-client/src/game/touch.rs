@@ -1943,12 +1943,17 @@ impl Game<'_> {
     }
 
     fn visible_touch_layout(&self, w: f32, h: f32) -> Vec<(Control, touch::Rect)> {
+        let playing = self.touch_playing();
         touch::layout(w, h)
             .into_iter()
             .filter(|(c, _)| {
                 // No controller overlay outside a world, including stale player
                 // state while returning to the title. Painting and hit tests agree.
                 if self.player.is_none() || self.title.is_some() {
+                    return false;
+                }
+                // The editor can keep a control out of the world, out of menus, or both.
+                if !touch::shown(*c, playing) {
                     return false;
                 }
                 if self.touch.hidden {
@@ -1976,6 +1981,7 @@ fn draw_amethyst_control(
     point: Option<(f32, f32)>,
 ) {
     let start = batch.vertices.len();
+    let (alpha, roundness) = touch::style(c);
     if c == Control::Joystick {
         let centre = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
         horizon_client::ui_theme::touch_disc(
@@ -2015,11 +2021,10 @@ fn draw_amethyst_control(
             Control::Right => "D",
             _ => "",
         };
-        horizon_client::ui_theme::touch_control(atlas, batch, r, label, held);
+        horizon_client::ui_theme::touch_control(atlas, batch, r, label, held, roundness);
     }
     for v in &mut batch.vertices[start..] {
-        v.color =
-            (v.color & 0x00ffffff) | ((((v.color >> 24) as f32 * touch::opacity(c)) as u32) << 24);
+        v.color = (v.color & 0x00ffffff) | ((((v.color >> 24) as f32 * alpha) as u32) << 24);
     }
 }
 

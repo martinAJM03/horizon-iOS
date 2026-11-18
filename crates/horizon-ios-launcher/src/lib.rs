@@ -324,12 +324,13 @@ pub fn present_download() -> bool {
     false
 }
 
-/// Snapshot ABI shared with TouchControls.swift: normalized centres, sizes and
-/// opacities, with NaN for built-in placement. Bits 0–5 are the shared options;
-/// bits 8–27 disable individual built-in controls in paint and hit testing.
+/// Snapshot ABI shared with TouchControls.swift: normalized centres, sizes,
+/// opacities, corner roundness and per-mode visibility, with NaN for built-in
+/// placement. Bits 0–5 are the shared options; bits 8–27 disable individual
+/// built-in controls (hidden or deleted) in paint and hit testing.
 /// An older/missing launcher keeps the original layout and visibility.
-pub fn touch_preferences() -> ([f32; 100], u32) {
-    let positions = [f32::NAN; 100];
+pub fn touch_preferences() -> ([f32; 160], u32) {
+    let positions = [f32::NAN; 160];
     #[cfg(target_os = "ios")]
     let (positions, hidden) = {
         let mut positions = positions;
@@ -445,15 +446,15 @@ mod ios {
             .then(|| CString::new(framework.into_os_string().into_encoded_bytes()).ok())?
     }
 
-    pub fn touch_preferences(positions: &mut [f32; 100]) -> u32 {
+    pub fn touch_preferences(positions: &mut [f32; 160]) -> u32 {
         // Resolve once, retaining the framework handle for the process lifetime.
         // No disk reads or dlopen calls in subsequent input/render frames.
         type Snapshot = extern "C" fn(*mut f32, u32) -> u32;
         static SNAPSHOT: std::sync::OnceLock<Option<Snapshot>> = std::sync::OnceLock::new();
         let snapshot = SNAPSHOT.get_or_init(|| {
             let path = framework()?;
-            // SAFETY: this bundled Swift C export accepts up to 26 writable
-            // floats and a capacity (older readers request 20), keeps no pointer and uses a locked snapshot.
+            // SAFETY: this bundled Swift C export accepts a writable buffer and
+            // its capacity, keeps no pointer and uses a locked snapshot.
             unsafe {
                 let handle = libc::dlopen(path.as_ptr(), libc::RTLD_NOW);
                 if handle.is_null() {
@@ -469,7 +470,7 @@ mod ios {
                 Some(std::mem::transmute::<*mut c_void, Snapshot>(symbol))
             }
         });
-        snapshot.map_or(0, |call| call(positions.as_mut_ptr(), 100))
+        snapshot.map_or(0, |call| call(positions.as_mut_ptr(), 160))
     }
 
     pub fn touch_modifiers() -> u32 {

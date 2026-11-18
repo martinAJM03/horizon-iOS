@@ -976,7 +976,14 @@ mod tests {
     }
 }
 
-pub fn touch_control(atlas: &HudAtlas, batch: &mut HudBatch, r: [f32; 4], label: &str, held: bool) {
+pub fn touch_control(
+    atlas: &HudAtlas,
+    batch: &mut HudBatch,
+    r: [f32; 4],
+    label: &str,
+    held: bool,
+    roundness: f32,
+) {
     let scale = batch.scale;
     let mut ui = Ui::new(atlas, batch, (0.0, 0.0));
     let k = scale / ui.density;
@@ -986,7 +993,7 @@ pub fn touch_control(atlas: &HudAtlas, batch: &mut HudBatch, r: [f32; 4], label:
         y,
         w,
         h,
-        w.min(h) / 2.0,
+        w.min(h) / 2.0 * roundness.clamp(0.0, 1.0),
         crate::hud::rgba(0, 0, 0, if held { 120 } else { 77 }),
     );
     let size = (h / if label.contains('\n') { 3.0 } else { 2.8 })
