@@ -395,6 +395,11 @@ impl Game<'_> {
             }
             return;
         }
+        // Hiding the buttons lasts while the world is under the fingers: a menu, the
+        // launcher or the next world brings them back.
+        if !self.touch_playing() {
+            self.touch.hidden = false;
+        }
         #[cfg(target_os = "ios")]
         self.touch_native_frame(event_loop);
         let playing = self.touch_playing();
@@ -1942,34 +1947,35 @@ impl Game<'_> {
         self.player.is_some() && self.title.is_none() && touch::cursor_mode()
     }
 
+    /// No controller overlay outside a world, including stale player state while
+    /// returning to the title. Painting and hit tests agree.
     fn visible_touch_layout(&self, w: f32, h: f32) -> Vec<(Control, touch::Rect)> {
+        if self.player.is_none() || self.title.is_some() {
+            return Vec::new();
+        }
         let playing = self.touch_playing();
-        touch::layout(w, h)
-            .into_iter()
-            .filter(|(c, _)| {
-                // No controller overlay outside a world, including stale player
-                // state while returning to the title. Painting and hit tests agree.
-                if self.player.is_none() || self.title.is_some() {
-                    return false;
-                }
-                // The editor can keep a control out of the world, out of menus, or both.
-                if !touch::shown(*c, playing) {
-                    return false;
-                }
-                if self.touch.hidden {
-                    matches!(c, Control::Hide | Control::Hotbar(_))
-                } else {
-                    self.touch.more
-                        || !matches!(
-                            c,
-                            Control::Perspective
-                                | Control::Chat
-                                | Control::Debug
-                                | Control::PlayerList
-                        )
-                }
-            })
-            .collect()
+        let mut layout = touch::layout(w, h);
+        if self.touch.hidden {
+            // Only the way back stays, and it stays whatever the layout editor did with
+            // it: a hidden layout whose Hide button was deleted, switched off for this
+            // mode or left out by a saved layout must not strand the player with no
+            // buttons at all until the app restarts.
+            layout.retain(|(c, _)| matches!(c, Control::Hide | Control::Hotbar(_)));
+            if !layout.iter().any(|(c, _)| *c == Control::Hide) {
+                layout.push((Control::Hide, touch::hide_rect(w, h)));
+            }
+            return layout;
+        }
+        layout.retain(|(c, _)| {
+            // The editor can keep a control out of the world, out of menus, or both.
+            touch::shown(*c, playing)
+                && (self.touch.more
+                    || !matches!(
+                        c,
+                        Control::Perspective | Control::Chat | Control::Debug | Control::PlayerList
+                    ))
+        });
+        layout
     }
 }
 fn draw_amethyst_control(

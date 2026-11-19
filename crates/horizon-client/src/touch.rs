@@ -160,6 +160,14 @@ fn default_layout(w: f32, h: f32) -> Vec<(Control, Rect)> {
     v
 }
 
+/// The Hide button's place, for a layout that has lost it: while the controls are
+/// hidden it is still drawn and hit-tested there, so a hide always has a way back.
+pub fn hide_rect(w: f32, h: f32) -> Rect {
+    let unit = w.min(h) / 768.0;
+    let s = 69.6 * unit;
+    [w - s, 0.0, s, 40.0 * unit]
+}
+
 /// Stable order shared with the app's layout editor; hotbar slots remain on the HUD.
 const EDITABLE: [Control; 20] = [
     Control::Forward,
@@ -736,6 +744,18 @@ mod custom_layout_tests {
         assert!(!hidden.iter().any(|(c, _)| *c == Control::Jump));
         assert_eq!(hit(&hidden, centre), None);
         assert_eq!(hidden.len(), normal.len() - 1);
+    }
+
+    #[test]
+    fn hidden_controls_keep_the_hide_button_where_the_layout_puts_it() {
+        for (w, h) in [(633.0, 292.0), (390.0, 844.0), (1024.0, 768.0)] {
+            let hide = layout_with_preferences(w, h, &[], 0)
+                .into_iter()
+                .find(|(c, _)| *c == Control::Hide)
+                .unwrap()
+                .1;
+            assert_eq!(hide_rect(w, h), hide);
+        }
     }
 
     #[test]

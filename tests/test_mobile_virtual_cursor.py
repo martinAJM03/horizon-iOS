@@ -26,7 +26,7 @@ class VirtualCursorTests(unittest.TestCase):
   fixture=r'''
 #![allow(dead_code)]
 #[path="SOURCE"] mod actual;
-mod touch {pub use crate::actual::{layout,desktop,Rect}; pub fn cursor_mode()->bool{true}}
+mod touch {pub use crate::actual::{layout,desktop,hide_rect,shown,Rect}; pub fn cursor_mode()->bool{true}}
 mod winit{pub mod keyboard{#[derive(Clone,Copy,Debug,Default,PartialEq)]pub struct ModifiersState(pub u8);}}
 // What is under a point: the test moves widgets by changing WIDGET, as a redraw would.
 mod horizon_client{pub mod hud_kit{pub mod room{pub use crate::Room;}} pub mod widgets{
@@ -92,6 +92,7 @@ impl Game{
  fn touch_now(&mut self)->f64{self.frames as f64/60.0}
  fn key_screen(&self)->u64{self.key}
  fn touch_batch(&self)->Option<Batch>{Some(Batch{width:self.size.0,height:self.size.1})}
+ fn touch_playing(&self)->bool{self.player.is_some() && self.title.is_none()}
  fn screen_batch(&self)->Option<RenderBatch>{Some(RenderBatch{scale:self.render_scale.max(1.)})}
  fn touch_effective_modifiers(&self)->winit::keyboard::ModifiersState{self.modifiers}
  fn screen_point(&self,at:(f32,f32))->(f32,f32){at}
@@ -156,6 +157,12 @@ fn main(){
   assert!(g.keys.is_empty());
   g.touch.hidden=true;assert!(g.visible_touch_layout(512.,300.).is_empty());
  }
+ // While the buttons are hidden, the Hide button always stays, so a hide can be
+ // undone even when the editor deleted it or switched it off for this mode.
+ let mut hidden=Game::new();hidden.touch.hidden=true;
+ let hidden_layout=hidden.visible_touch_layout(512.,300.);
+ assert!(hidden_layout.iter().any(|(c,_)|*c==Control::Hide));
+ assert!(hidden_layout.iter().all(|(c,_)|matches!(*c,Control::Hide|Control::Hotbar(_))));
  // Returning to the title hides controls even if player teardown is not finished.
  let mut title=Game::new();title.title=Some(());
  assert!(!title.visible_touch_layout(512.,300.).iter().any(|(c,_)|*c==Control::Forward));

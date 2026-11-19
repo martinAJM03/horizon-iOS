@@ -939,7 +939,11 @@ final class TouchGestureBridge: NSObject, UIGestureRecognizerDelegate {
                 customViews[definition.id]=button;surface.addSubview(button)
             }
             guard let button=customViews[definition.id] else{continue}
-            let hidden = !active || (controlsHidden && !definition.keys.contains(-2) && !definition.keys.contains(-5)) || (playing ? !definition.inGame : !definition.inMenu)
+            // The buttons that turn the overlay back on stay on screen while it is
+            // hidden, whatever their in-game/in-menu switches say: hiding them too
+            // would leave no way back without restarting the app.
+            let wayBack = controlsHidden && (definition.keys.contains(-2) || definition.keys.contains(-5))
+            let hidden = !active || (controlsHidden ? !wayBack : (playing ? !definition.inGame : !definition.inMenu))
             if hidden {button.release()}
             button.isHidden=hidden
             let rect=definition.rect(in:gui)
